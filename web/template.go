@@ -35,6 +35,7 @@ tr:hover td { background: #fafafa; }
 .safe { color: #2E7D32; }
 a { color: #1565C0; }
 </style>
+
 </head>
 <body>
 <h1>NilAway Analysis Report</h1>
@@ -65,6 +66,12 @@ a { color: #1565C0; }
 {{end}}
 </tbody>
 </table>
+{{if gt .StdlibTriggers 0}}
+<p style="font-size:0.85em;color:#666;margin-top:1em;">
+  Also found <strong>{{.StdlibTriggers}}</strong> trigger(s) in standard library files
+  (pages generated but not listed above; accessible via producer/consumer links).
+</p>
+{{end}}
 </body>
 </html>`
 
@@ -111,6 +118,13 @@ pre {
 .consumer { background: #E3F2FD; }       /* blue tint   */
 .trigger-error { outline: 2px solid #C62828; outline-offset: -1px; }
 .trigger-safe  { outline: 2px solid #2E7D32; outline-offset: -1px; }
+
+/* Spans are rendered as <a> for anchor targeting and cross-linking.
+   Inherit colour so the highlight classes control the appearance; only
+   show a pointer and underline when an href is present. */
+pre a { color: inherit; text-decoration: none; cursor: default; }
+pre a[href] { cursor: pointer; }
+pre a[href]:hover { text-decoration: underline; }
 
 /* Legend */
 .legend { margin: 1em 0; font-size: 0.88em; }

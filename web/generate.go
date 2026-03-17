@@ -21,6 +21,7 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -36,11 +37,12 @@ type indexRow struct {
 
 // indexData is the template data for the index page.
 type indexData struct {
-	TotalFiles    int
-	TotalErrors   int
-	TotalSafe     int
-	TotalTriggers int
-	Rows          []indexRow
+	TotalFiles      int
+	TotalErrors     int
+	TotalSafe       int
+	TotalTriggers   int
+	StdlibTriggers  int // triggers in stdlib files, omitted from Rows
+	Rows            []indexRow
 }
 
 // triggerRow is used as template data for one trigger in a file page.
@@ -80,16 +82,28 @@ func Generate(outputDir string, registry *Registry) error {
 	sort.Strings(filenames)
 
 	var (
-		rows        []indexRow
-		totalErrors int
-		totalSafe   int
+		rows           []indexRow
+		totalErrors    int
+		totalSafe      int
+		stdlibTriggers int
 	)
 
 	for _, fn := range filenames {
 		fd := registry.Files[fn]
 		htmlFile := filePageName(fn)
 
+		// Always generate the file page so cross-file trigger links resolve.
+		if err := writeFilePage(outputDir, htmlFile, fd, registry); err != nil {
+			return fmt.Errorf("write file page for %s: %w", fn, err)
+		}
+
 		errs, safe := countSpans(fd)
+		// Stdlib files are kept out of the main index to reduce noise; their
+		// pages still exist so producer/consumer links from user-code pages work.
+		if isStdlibFile(fn) {
+			stdlibTriggers += errs + safe
+			continue
+		}
 		rows = append(rows, indexRow{
 			Filename: fn,
 			Link:     htmlFile,
@@ -99,13 +113,9 @@ func Generate(outputDir string, registry *Registry) error {
 		})
 		totalErrors += errs
 		totalSafe += safe
-
-		if err := writeFilePage(outputDir, htmlFile, fd, registry); err != nil {
-			return fmt.Errorf("write file page for %s: %w", fn, err)
-		}
 	}
 
-	return writeIndexPage(outputDir, rows, totalErrors, totalSafe)
+	return writeIndexPage(outputDir, rows, totalErrors, totalSafe, stdlibTriggers)
 }
 
 // filePageName returns a safe HTML filename for an absolute source path.
@@ -132,8 +142,14 @@ func countSpans(fd *FileData) (errors, safe int) {
 	return
 }
 
+// isStdlibFile reports whether filename lives inside the Go standard library.
+func isStdlibFile(filename string) bool {
+	root := runtime.GOROOT()
+	return root != "" && strings.HasPrefix(filename, root+string(filepath.Separator))
+}
+
 // writeIndexPage writes index.html to outputDir.
-func writeIndexPage(outputDir string, rows []indexRow, totalErrors, totalSafe int) error {
+func writeIndexPage(outputDir string, rows []indexRow, totalErrors, totalSafe, stdlibTriggers int) error {
 	f, err := os.Create(filepath.Join(outputDir, "index.html"))
 	if err != nil {
 		return err
@@ -141,11 +157,12 @@ func writeIndexPage(outputDir string, rows []indexRow, totalErrors, totalSafe in
 	defer f.Close() //nolint:errcheck
 
 	d := indexData{
-		TotalFiles:    len(rows),
-		TotalErrors:   totalErrors,
-		TotalSafe:     totalSafe,
-		TotalTriggers: totalErrors + totalSafe,
-		Rows:          rows,
+		TotalFiles:     len(rows),
+		TotalErrors:    totalErrors,
+		TotalSafe:      totalSafe,
+		TotalTriggers:  totalErrors + totalSafe,
+		StdlibTriggers: stdlibTriggers,
+		Rows:           rows,
 	}
 	return indexTmpl.Execute(f, d)
 }
@@ -157,6 +174,25 @@ func writeFilePage(outputDir, htmlFile string, fd *FileData, registry *Registry)
 		return err
 	}
 	defer f.Close() //nolint:errcheck
+
+	// Populate ID and cross-link for each span so annotateSource can render
+	// clickable <a> elements that navigate to the paired producer/consumer.
+	for _, sp := range fd.Spans {
+		t := registry.Triggers[sp.TriggerIdx]
+		role, otherRole, otherFile := "cons", "prod", t.ProducerFile
+		if sp.IsProducer {
+			role, otherRole, otherFile = "prod", "cons", t.ConsumerFile
+		}
+		sp.ID = fmt.Sprintf("t%d-%s", sp.TriggerIdx, role)
+		switch {
+		case otherFile == "":
+			sp.Link = ""
+		case otherFile == fd.Filename:
+			sp.Link = fmt.Sprintf("#t%d-%s", sp.TriggerIdx, otherRole)
+		default:
+			sp.Link = fmt.Sprintf("%s#t%d-%s", filePageName(otherFile), sp.TriggerIdx, otherRole)
+		}
+	}
 
 	// Collect triggers relevant to this file (deduplicated by trigger index).
 	seen := make(map[int]bool)
@@ -172,14 +208,14 @@ func writeFilePage(outputDir, htmlFile string, fd *FileData, registry *Registry)
 			IsError:      e.IsError,
 			ConsumerFile: filepath.Base(e.ConsumerFile),
 			ConsumerLine: e.ConsumerLine,
-			ConsumerLink: filePageName(e.ConsumerFile),
+			ConsumerLink: fmt.Sprintf("%s#t%d-cons", filePageName(e.ConsumerFile), sp.TriggerIdx),
 			ProducerDesc: e.ProducerDesc,
 			ConsumerDesc: e.ConsumerDesc,
 		}
 		if e.ProducerFile != "" {
 			tr.ProducerFile = filepath.Base(e.ProducerFile)
 			tr.ProducerLine = e.ProducerLine
-			tr.ProducerLink = filePageName(e.ProducerFile)
+			tr.ProducerLink = fmt.Sprintf("%s#t%d-prod", filePageName(e.ProducerFile), sp.TriggerIdx)
 		}
 		trows = append(trows, tr)
 	}
@@ -216,12 +252,18 @@ func annotateSource(fd *FileData) string {
 		if sp.Start < 0 || sp.End <= sp.Start || sp.End > len(src) {
 			continue
 		}
-		classes := spanClasses(sp)
-		openTag := fmt.Sprintf(`<span class="%s" title="%s">`,
-			template.HTMLEscapeString(classes),
-			template.HTMLEscapeString(sp.Tooltip))
+		classes := template.HTMLEscapeString(spanClasses(sp))
+		tooltip := template.HTMLEscapeString(sp.Tooltip)
+		id := template.HTMLEscapeString(sp.ID)
+		var openTag string
+		if sp.Link != "" {
+			openTag = fmt.Sprintf(`<a id="%s" class="%s" title="%s" href="%s">`,
+				id, classes, tooltip, template.HTMLEscapeString(sp.Link))
+		} else {
+			openTag = fmt.Sprintf(`<a id="%s" class="%s" title="%s">`, id, classes, tooltip)
+		}
 		events = append(events, spanEvent{offset: sp.Start, isOpen: true, tag: openTag, spanIdx: i})
-		events = append(events, spanEvent{offset: sp.End, isOpen: false, tag: "</span>", spanIdx: i})
+		events = append(events, spanEvent{offset: sp.End, isOpen: false, tag: "</a>", spanIdx: i})
 	}
 
 	// Sort: by offset; at the same offset, opens before closes.

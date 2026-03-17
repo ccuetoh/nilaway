@@ -27,6 +27,9 @@ type SpanData struct {
 	TriggerIdx int  // index into Registry.Triggers
 	IsError    bool // true if this trigger fires (would cause a nil panic)
 	Tooltip    string
+	// ID and Link are populated by Generate before rendering, not during analysis.
+	ID   string // HTML id attribute for anchor targeting (e.g. "t5-prod")
+	Link string // href to navigate to the counterpart span (may be empty)
 }
 
 // TriggerEntry holds the full producer→consumer relationship for one trigger.
