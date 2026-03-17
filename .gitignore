@@ -26,8 +26,8 @@ cover.html
 
 # Local binary folder
 bin/
-nilaway
-nilaway-web
+/nilaway
+/nilaway-web
 
 # Local build folder for storing build artifacts
 build/

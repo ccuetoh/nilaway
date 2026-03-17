@@ -30,7 +30,6 @@ import (
 	nilawayWeb "go.uber.org/nilaway/web"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/checker"
-	"golang.org/x/tools/go/analysis/singlechecker"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -138,32 +137,19 @@ func main() {
 	flag.StringVar(&_includeErrorsInFiles, "include-errors-in-files", wd, "A comma-separated list of file prefixes to report errors, default is current working directory.")
 	flag.StringVar(&_excludeErrorsInFiles, "exclude-errors-in-files", "", "A comma-separated list of file prefixes to exclude from error reporting. This takes precedence over include-errors-in-files.")
 
-	// When -output-web is set, the binary generates a static HTML trigger visualization
-	// in addition to normal error reporting. We use the programmatic checker.Analyze path
-	// in this case since singlechecker calls os.Exit and does not allow post-analysis work.
+	// If set, generate a static HTML trigger visualization report in addition to normal output.
 	var outputWebDir string
 	flag.StringVar(&outputWebDir, "output-web", "", "If non-empty, generate a static HTML trigger visualization report in this directory.")
 
-	// Parse flags early so we can check -output-web before deciding which execution path to take.
-	// singlechecker.Main will call flag.Parse again, but that is idempotent.
 	flag.Parse()
 
-	if outputWebDir != "" {
-		os.Exit(runWebMode(flag.Args(), outputWebDir))
-	}
-
-	singlechecker.Main(Analyzer)
-}
-
-// runWebMode runs the analysis programmatically (bypassing singlechecker) so that we can
-// generate the HTML report after all packages have been analyzed.
-// It prints diagnostics to stderr in the same format as singlechecker and returns an exit code.
-func runWebMode(patterns []string, outputDir string) int {
+	patterns := flag.Args()
 	if len(patterns) == 0 {
 		patterns = []string{"./..."}
 	}
 
-	cfg := &packages.Config{
+	// Load packages. checker.Analyze requires full syntax information.
+	pkgs, err := packages.Load(&packages.Config{
 		Mode: packages.NeedName |
 			packages.NeedFiles |
 			packages.NeedCompiledGoFiles |
@@ -173,53 +159,51 @@ func runWebMode(patterns []string, outputDir string) int {
 			packages.NeedSyntax |
 			packages.NeedTypesInfo |
 			packages.NeedTypesSizes,
-	}
-
-	pkgs, err := packages.Load(cfg, patterns...)
+	}, patterns...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load packages: %v\n", err)
-		return 1
+		os.Exit(1)
 	}
-
-	var loadErrors bool
 	for _, pkg := range pkgs {
 		for _, e := range pkg.Errors {
 			fmt.Fprintln(os.Stderr, e)
-			loadErrors = true
 		}
 	}
-	if loadErrors {
-		return 1
+
+	// When -output-web is set, include the web analyzer so it collects trigger data
+	// alongside the normal analysis run.
+	analyzers := []*analysis.Analyzer{Analyzer}
+	if outputWebDir != "" {
+		analyzers = append(analyzers, nilawayWeb.Analyzer)
 	}
 
-	// Run both Analyzer (for diagnostics) and web.Analyzer (for the HTML report).
-	// The checker deduplicates shared sub-analyzers so the analysis work is not doubled.
-	graph, err := checker.Analyze(
-		[]*analysis.Analyzer{Analyzer, nilawayWeb.Analyzer},
-		pkgs, nil)
+	graph, err := checker.Analyze(analyzers, pkgs, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "analysis: %v\n", err)
-		return 1
+		os.Exit(1)
 	}
 
-	// Print diagnostics in the same format as singlechecker.
+	// Print diagnostics and determine the exit code.
 	exitCode := 0
 	for act := range graph.All() {
 		if act.Analyzer != Analyzer {
 			continue
 		}
 		for _, d := range act.Diagnostics {
-			posn := act.Package.Fset.Position(d.Pos)
-			fmt.Fprintf(os.Stderr, "%s: %s\n", posn, d.Message)
+			fmt.Fprintf(os.Stderr, "%s: %s\n", act.Package.Fset.Position(d.Pos), d.Message)
 			exitCode = 1
 		}
 	}
 
-	if err := nilawayWeb.Generate(outputDir, nilawayWeb.GlobalRegistry); err != nil {
-		fmt.Fprintf(os.Stderr, "generate web report: %v\n", err)
-		return 1
+	// Generate the HTML report if requested. This runs after all packages are analyzed,
+	// which is why the programmatic checker.Analyze path is used instead of singlechecker.
+	if outputWebDir != "" {
+		if err := nilawayWeb.Generate(outputWebDir, nilawayWeb.GlobalRegistry); err != nil {
+			fmt.Fprintf(os.Stderr, "generate web report: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "NilAway web report: %s/index.html\n", outputWebDir)
 	}
 
-	fmt.Fprintf(os.Stderr, "NilAway web report: %s/index.html\n", outputDir)
-	return exitCode
+	os.Exit(exitCode)
 }
