@@ -17,7 +17,7 @@ package web
 import (
 	"go/token"
 
-	"go.uber.org/nilaway/accumulation"
+	"go.uber.org/nilaway"
 	"go.uber.org/nilaway/annotation"
 	"go.uber.org/nilaway/assertion"
 	"go.uber.org/nilaway/config"
@@ -32,7 +32,7 @@ var Analyzer = &analysis.Analyzer{
 	Name:     "nilaway_web",
 	Doc:      "Collect NilAway trigger data for static web UI generation",
 	Run:      run,
-	Requires: []*analysis.Analyzer{config.Analyzer, assertion.Analyzer, accumulation.Analyzer},
+	Requires: []*analysis.Analyzer{config.Analyzer, assertion.Analyzer, nilaway.Analyzer},
 }
 
 func run(p *analysis.Pass) (interface{}, error) {
@@ -50,8 +50,9 @@ func run(p *analysis.Pass) (interface{}, error) {
 	}
 	triggers := assertResult.Res
 
-	// Get diagnostics (fired triggers) from accumulation.
-	diagnostics := pass.ResultOf[accumulation.Analyzer].([]analysis.Diagnostic)
+	// Reuse the diagnostics already computed by nilaway.Analyzer instead of
+	// re-querying accumulation.Analyzer independently.
+	diagnostics := pass.ResultOf[nilaway.Analyzer].([]analysis.Diagnostic)
 
 	// Build set of consumer positions that correspond to errors.
 	errorPositions := make(map[token.Pos]bool, len(diagnostics))

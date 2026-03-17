@@ -26,23 +26,22 @@ import (
 
 	"go.uber.org/nilaway"
 	"go.uber.org/nilaway/config"
-	"go.uber.org/nilaway/util/analysishelper"
 	nilawayWeb "go.uber.org/nilaway/web"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/checker"
 	"golang.org/x/tools/go/packages"
 )
 
-// Analyzer is identical to the one in nilaway.go, except that it overrides the run function for
-// extra filtering of errors, since the singlechecker does not support error suppression like other
-// popular linter drivers.
+// Analyzer wraps nilaway.Analyzer to add file-prefix-based error suppression,
+// which is not supported by the underlying singlechecker framework.
+// It reads the already-computed diagnostics from nilaway.Analyzer's result and
+// re-reports only those that pass the include/exclude filters.
 var Analyzer = &analysis.Analyzer{
-	Name:       nilaway.Analyzer.Name,
-	Doc:        nilaway.Analyzer.Doc,
-	Run:        run,
-	FactTypes:  nilaway.Analyzer.FactTypes,
-	ResultType: nilaway.Analyzer.ResultType,
-	Requires:   nilaway.Analyzer.Requires,
+	Name:      nilaway.Analyzer.Name,
+	Doc:       nilaway.Analyzer.Doc,
+	Run:       run,
+	FactTypes: nilaway.Analyzer.FactTypes,
+	Requires:  []*analysis.Analyzer{nilaway.Analyzer},
 }
 
 var (
@@ -53,15 +52,12 @@ var (
 )
 
 func run(p *analysis.Pass) (interface{}, error) {
-	pass := analysishelper.NewEnhancedPass(p)
 	// NilAway by default analyzes all packages, including dependencies. Even if specified to
 	// exclude packages from analysis via configurations, NilAway can still report errors on
 	// packages that are not analyzed if the nilness flow happens within the analyzed package, but
 	// the flow concerns a struct that is in an excluded package. The usual way to handle them is
-	// to suppress them at the driver level, but singlechecker does not support that yet. Therefore,
-	// here we add extra logic to filter the errors.
-
-	// Properly parse the error suppression flags.
+	// to suppress them at the driver level. Here we filter the diagnostics already produced by
+	// nilaway.Analyzer rather than intercepting pass.Report via a closure.
 	includes, err := parseFilePrefixes(_includeErrorsInFiles)
 	if err != nil {
 		return nil, fmt.Errorf("parse file prefixes for error inclusion: %w", err)
@@ -71,26 +67,27 @@ func run(p *analysis.Pass) (interface{}, error) {
 		return nil, fmt.Errorf("parse file prefixes for error exclusion: %w", err)
 	}
 
-	// Override the report function to add error filtering logic.
-	report := pass.Report
-	pass.Report = func(d analysis.Diagnostic) {
-		p := pass.Fset.File(d.Pos).Name()
+	for _, d := range p.ResultOf[nilaway.Analyzer].([]analysis.Diagnostic) {
+		fname := p.Fset.File(d.Pos).Name()
+		excluded := false
 		for _, e := range excludes {
-			if strings.HasPrefix(p, e) {
-				return
+			if strings.HasPrefix(fname, e) {
+				excluded = true
+				break
 			}
 		}
-
+		if excluded {
+			continue
+		}
 		for _, i := range includes {
-			if strings.HasPrefix(p, i) {
-				report(d)
-				return
+			if strings.HasPrefix(fname, i) {
+				p.Report(d)
+				break
 			}
 		}
 	}
 
-	// Delegate the real analysis run to the original nilaway analyzer.
-	return nilaway.Analyzer.Run(p)
+	return nil, nil
 }
 
 // parseFilePrefixes parses the comma-separated list of file prefixes, converts them to absolute

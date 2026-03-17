@@ -18,6 +18,7 @@ package nilaway
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 
 	"go.uber.org/nilaway/accumulation"
@@ -32,25 +33,31 @@ const _doc = "Run NilAway on this package to report any possible flows of nil va
 // Analyzer is the top-level instance of Analyzer - it coordinates the entire dataflow to report
 // nil flow errors in this package. It is needed here for nogo to recognize the package.
 var Analyzer = &analysis.Analyzer{
-	Name:      "nilaway",
-	Doc:       _doc,
-	Run:       run,
-	FactTypes: []analysis.Fact{},
-	Requires:  []*analysis.Analyzer{config.Analyzer, accumulation.Analyzer},
+	Name:       "nilaway",
+	Doc:        _doc,
+	Run:        run,
+	FactTypes:  []analysis.Fact{},
+	ResultType: reflect.TypeOf([]analysis.Diagnostic{}),
+	Requires:   []*analysis.Analyzer{config.Analyzer, accumulation.Analyzer},
 }
 
 func run(p *analysis.Pass) (interface{}, error) {
 	pass := analysishelper.NewEnhancedPass(p)
 	conf := pass.ResultOf[config.Analyzer].(*config.Config)
 	deferredErrors := pass.ResultOf[accumulation.Analyzer].([]analysis.Diagnostic)
+
+	// Build the result slice while reporting. Each element is a copy so the
+	// PrettyPrint message transformation does not mutate accumulation's slice.
+	result := make([]analysis.Diagnostic, 0, len(deferredErrors))
 	for _, e := range deferredErrors {
 		if conf.PrettyPrint {
 			e.Message = PrettyPrintErrorMessage(e.Message)
 		}
 		pass.Report(e)
+		result = append(result, e)
 	}
 
-	return nil, nil
+	return result, nil
 }
 
 var codeReferencePattern = regexp.MustCompile("\\`(.*?)\\`")
