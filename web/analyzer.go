@@ -16,6 +16,7 @@ package web
 
 import (
 	"go/token"
+	"os"
 
 	"go.uber.org/nilaway"
 	"go.uber.org/nilaway/annotation"
@@ -74,18 +75,25 @@ func run(p *analysis.Pass) (interface{}, error) {
 		cStart := pass.Fset.Position(t.Consumer.Expr.Pos())
 		cEnd := pass.Fset.Position(t.Consumer.Expr.End())
 
-		// Producer is only annotated when its expression is authentic (not
-		// an artificial node created by NilAway internally).
+		// For diagnostic reporting ExprIsAuthentic guards against misleading locations
+		// from synthetic AST nodes. For the web report we relax this: synthetic nodes
+		// created for cross-package producers (including stdlib) still carry obj.Pos(),
+		// which is a real byte offset in the declaring file. We accept any producer
+		// whose resolved position has a non-empty filename.
 		var pStart, pEnd token.Position
-		hasProducer := t.Producer.Expr != nil && pass.ExprIsAuthentic(t.Producer.Expr)
-		if hasProducer {
-			pStart = pass.Fset.Position(t.Producer.Expr.Pos())
-			pEnd = pass.Fset.Position(t.Producer.Expr.End())
+		var hasProducer bool
+		if t.Producer.Expr != nil {
+			pos := pass.Fset.Position(t.Producer.Expr.Pos())
+			if pos.IsValid() && pos.Filename != "" {
+				pStart = pos
+				pEnd = pass.Fset.Position(t.Producer.Expr.End())
+				hasProducer = true
+			}
 		}
 
 		producerDesc, consumerDesc := t.Prestrings(pass)
 
-		// Build a TriggerEntry; producer file/line may be empty when not authentic.
+		// Build a TriggerEntry; producer file/line may be empty when position is unknown.
 		entry := &TriggerEntry{
 			ConsumerFile: cStart.Filename,
 			ConsumerLine: cStart.Line,
@@ -100,8 +108,7 @@ func run(p *analysis.Pass) (interface{}, error) {
 		triggerIdx := GlobalRegistry.addTrigger(entry)
 
 		// Annotate the consumer file.
-		cSrc, _ := pass.ReadFile(cStart.Filename)
-		GlobalRegistry.addSpan(cStart.Filename, cSrc, &SpanData{
+		GlobalRegistry.addSpan(cStart.Filename, readSource(pass, cStart.Filename), &SpanData{
 			Start:      cStart.Offset,
 			End:        cEnd.Offset,
 			IsProducer: false,
@@ -110,10 +117,10 @@ func run(p *analysis.Pass) (interface{}, error) {
 			Tooltip:    consumerDesc.String(),
 		})
 
-		// Annotate the producer file (only if authentic and different from consumer file).
+		// Annotate the producer file. pass.ReadFile is restricted to the current
+		// package, so fall back to os.ReadFile for cross-package files (stdlib etc.).
 		if hasProducer {
-			pSrc, _ := pass.ReadFile(pStart.Filename)
-			GlobalRegistry.addSpan(pStart.Filename, pSrc, &SpanData{
+			GlobalRegistry.addSpan(pStart.Filename, readSource(pass, pStart.Filename), &SpanData{
 				Start:      pStart.Offset,
 				End:        pEnd.Offset,
 				IsProducer: true,
@@ -125,4 +132,14 @@ func run(p *analysis.Pass) (interface{}, error) {
 	}
 
 	return nil, nil
+}
+
+// readSource reads a file's contents using pass.ReadFile, falling back to os.ReadFile
+// for files outside the current package (e.g. stdlib or other dependencies).
+func readSource(pass *analysishelper.EnhancedPass, filename string) []byte {
+	src, err := pass.ReadFile(filename)
+	if err != nil || len(src) == 0 {
+		src, _ = os.ReadFile(filename)
+	}
+	return src
 }
