@@ -195,7 +195,16 @@ func main() {
 	// Generate the HTML report if requested. This runs after all packages are analyzed,
 	// which is why the programmatic checker.Analyze path is used instead of singlechecker.
 	if outputWebDir != "" {
-		if err := nilawayWeb.Generate(outputWebDir, nilawayWeb.GlobalRegistry); err != nil {
+		merged := nilawayWeb.NewRegistry()
+		for act := range graph.All() {
+			if act.Analyzer != nilawayWeb.Analyzer {
+				continue
+			}
+			if r, ok := act.Result.(*nilawayWeb.Registry); ok && r != nil {
+				merged.Merge(r)
+			}
+		}
+		if err := nilawayWeb.Generate(outputWebDir, merged); err != nil {
 			fmt.Fprintf(os.Stderr, "generate web report: %v\n", err)
 			os.Exit(1)
 		}

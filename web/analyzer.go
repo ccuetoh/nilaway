@@ -17,6 +17,7 @@ package web
 import (
 	"go/token"
 	"os"
+	"reflect"
 
 	"go.uber.org/nilaway"
 	"go.uber.org/nilaway/annotation"
@@ -26,14 +27,15 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-// Analyzer collects NilAway trigger data into GlobalRegistry.
+// Analyzer collects NilAway trigger data and returns a *Registry for this package.
+// Combine per-package registries using Registry.Merge after all packages are analyzed.
 // It must be run as a top-level analyzer (e.g. via checker.Analyze).
-// It has no result type; all output goes into GlobalRegistry.
 var Analyzer = &analysis.Analyzer{
-	Name:     "nilaway_web",
-	Doc:      "Collect NilAway trigger data for static web UI generation",
-	Run:      run,
-	Requires: []*analysis.Analyzer{config.Analyzer, assertion.Analyzer, nilaway.Analyzer},
+	Name:       "nilaway_web",
+	Doc:        "Collect NilAway trigger data for static web UI generation",
+	Run:        run,
+	ResultType: reflect.TypeOf((*Registry)(nil)),
+	Requires:   []*analysis.Analyzer{config.Analyzer, assertion.Analyzer, nilaway.Analyzer},
 }
 
 func run(p *analysis.Pass) (interface{}, error) {
@@ -41,13 +43,13 @@ func run(p *analysis.Pass) (interface{}, error) {
 	conf := pass.ResultOf[config.Analyzer].(*config.Config)
 
 	if !conf.IsPkgInScope(pass.Pkg) {
-		return nil, nil
+		return NewRegistry(), nil
 	}
 
 	// Get all triggers from the assertion analyzer.
 	assertResult := pass.ResultOf[assertion.Analyzer].(*analysishelper.Result[[]annotation.FullTrigger])
 	if assertResult.Err != nil {
-		return nil, nil
+		return NewRegistry(), nil
 	}
 	triggers := assertResult.Res
 
@@ -61,8 +63,7 @@ func run(p *analysis.Pass) (interface{}, error) {
 		errorPositions[d.Pos] = true
 	}
 
-	GlobalRegistry.mu.Lock()
-	defer GlobalRegistry.mu.Unlock()
+	registry := NewRegistry()
 
 	for _, t := range triggers {
 		if t.CreatedFromDuplication || t.Consumer == nil || t.Consumer.Expr == nil {
@@ -105,10 +106,10 @@ func run(p *analysis.Pass) (interface{}, error) {
 			entry.ProducerFile = pStart.Filename
 			entry.ProducerLine = pStart.Line
 		}
-		triggerIdx := GlobalRegistry.addTrigger(entry)
+		triggerIdx := registry.addTrigger(entry)
 
 		// Annotate the consumer file.
-		GlobalRegistry.addSpan(cStart.Filename, readSource(pass, cStart.Filename), &SpanData{
+		registry.addSpan(cStart.Filename, readSource(pass, cStart.Filename), &SpanData{
 			Start:      cStart.Offset,
 			End:        cEnd.Offset,
 			IsProducer: false,
@@ -120,7 +121,7 @@ func run(p *analysis.Pass) (interface{}, error) {
 		// Annotate the producer file. pass.ReadFile is restricted to the current
 		// package, so fall back to os.ReadFile for cross-package files (stdlib etc.).
 		if hasProducer {
-			GlobalRegistry.addSpan(pStart.Filename, readSource(pass, pStart.Filename), &SpanData{
+			registry.addSpan(pStart.Filename, readSource(pass, pStart.Filename), &SpanData{
 				Start:      pStart.Offset,
 				End:        pEnd.Offset,
 				IsProducer: true,
@@ -131,7 +132,7 @@ func run(p *analysis.Pass) (interface{}, error) {
 		}
 	}
 
-	return nil, nil
+	return registry, nil
 }
 
 // readSource reads a file's contents using pass.ReadFile, falling back to os.ReadFile

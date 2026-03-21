@@ -15,8 +15,6 @@
 // Package web provides static HTML site generation for NilAway trigger visualization.
 package web
 
-import "sync"
-
 // SpanData represents a highlighted region in a source file,
 // corresponding to either a producer or a consumer site of a trigger.
 type SpanData struct {
@@ -50,21 +48,45 @@ type FileData struct {
 	Spans    []*SpanData
 }
 
-// Registry collects trigger data across all analyzed packages.
-// It is populated concurrently by web.Analyzer during analysis.
+// Registry collects trigger data for one analyzed package.
+// It is populated by a single web.Analyzer run and is not safe for
+// concurrent use; callers must not share a Registry across goroutines.
 type Registry struct {
-	mu       sync.Mutex
 	Files    map[string]*FileData // absolute filename → file data
 	Triggers []*TriggerEntry
 }
 
-// GlobalRegistry is populated by web.Analyzer during analysis and
-// consumed by Generate to write the static site.
-var GlobalRegistry = &Registry{
-	Files: make(map[string]*FileData),
+// NewRegistry returns an empty Registry ready for use.
+func NewRegistry() *Registry {
+	return &Registry{Files: make(map[string]*FileData)}
+}
+
+// Merge copies all data from src into r. It is called after analysis to
+// combine per-package registries into one before HTML generation.
+// src must not be modified concurrently.
+func (r *Registry) Merge(src *Registry) {
+	// Record the current length as the offset so span TriggerIdx values from
+	// src can be remapped into r's trigger slice.
+	offset := len(r.Triggers)
+	r.Triggers = append(r.Triggers, src.Triggers...)
+
+	for fn, srcFD := range src.Files {
+		dstFD, ok := r.Files[fn]
+		if !ok {
+			dstFD = &FileData{Filename: fn, Source: srcFD.Source}
+			r.Files[fn] = dstFD
+		}
+		for _, sp := range srcFD.Spans {
+			// Copy span and remap its TriggerIdx into the merged trigger slice.
+			copied := *sp
+			copied.TriggerIdx += offset
+			dstFD.Spans = append(dstFD.Spans, &copied)
+		}
+	}
 }
 
 // addTrigger appends a TriggerEntry and returns its index.
+// Must be called only from a single goroutine (the analyzer run for this package).
 func (r *Registry) addTrigger(t *TriggerEntry) int {
 	r.Triggers = append(r.Triggers, t)
 	return len(r.Triggers) - 1
@@ -72,6 +94,7 @@ func (r *Registry) addTrigger(t *TriggerEntry) int {
 
 // addSpan records a highlighted span for the given file.
 // If the file has not been seen before, source is stored.
+// Must be called only from a single goroutine (the analyzer run for this package).
 func (r *Registry) addSpan(filename string, source []byte, span *SpanData) {
 	fd, ok := r.Files[filename]
 	if !ok {
