@@ -63,7 +63,7 @@ func NewRegistry() *Registry {
 
 // Merge copies all data from src into r. It is called after analysis to
 // combine per-package registries into one before HTML generation.
-// src must not be modified concurrently.
+// When the same file appears in both registries, the Source from r wins.
 func (r *Registry) Merge(src *Registry) {
 	// Record the current length as the offset so span TriggerIdx values from
 	// src can be remapped into r's trigger slice.

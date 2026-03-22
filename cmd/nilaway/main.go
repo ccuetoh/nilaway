@@ -197,10 +197,10 @@ func main() {
 	if outputWebDir != "" {
 		merged := nilawayWeb.NewRegistry()
 		for act := range graph.All() {
-			if act.Analyzer != nilawayWeb.Analyzer {
+			if act.Analyzer != nilawayWeb.Analyzer || !act.IsRoot {
 				continue
 			}
-			if r, ok := act.Result.(*nilawayWeb.Registry); ok && r != nil {
+			if r, ok := act.Result.(*nilawayWeb.Registry); ok {
 				merged.Merge(r)
 			}
 		}
