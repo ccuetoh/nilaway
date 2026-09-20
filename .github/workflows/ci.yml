@@ -8,7 +8,8 @@ on:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         name: Check out repository
@@ -40,8 +41,12 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
+      # Do not cancel the sibling matrix leg when one leg fails: a platform-initiated runner
+      # shutdown on one leg must not hide the other leg's result.
+      fail-fast: false
       matrix:
         go: [ "1.26.x", "1.27.x" ]
     steps:
@@ -52,12 +57,9 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           cache: true
-
-      - name: Load cached dependencies
-        uses: actions/cache@v6
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
 
       - name: Download dependencies
         run: go mod download
@@ -66,9 +68,13 @@ jobs:
         run: make build
 
       - name: Test and generate coverage report
-        run: make cover
+        run: bash .github/scripts/memmon.sh make cover
         env:
           GOFLAGS: -timeout=20m
+
+      - name: Collect failure diagnostics
+        if: failure()
+        run: bash .github/scripts/failure-diagnostics.sh
 
       - name: Upload coverage to codecov.io
         uses: codecov/codecov-action@v7
@@ -77,8 +83,10 @@ jobs:
 
   integration-test:
     name: Integration Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         go: [ "1.26.x", "1.27.x" ]
     steps:
@@ -89,15 +97,16 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           cache: true
-
-      - name: Load cached dependencies
-        uses: actions/cache@v6
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
 
       - name: Download dependencies
         run: go mod download
 
       - name: Run integration tests
-        run: make integration-test
+        run: bash .github/scripts/memmon.sh make integration-test
+
+      - name: Collect failure diagnostics
+        if: failure()
+        run: bash .github/scripts/failure-diagnostics.sh
