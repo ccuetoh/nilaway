@@ -59,6 +59,10 @@ golden-test:
 	@cd tools && go install go.uber.org/nilaway/tools/cmd/golden-test
 	@$(GOBIN)/golden-test $(ARGS)
 
+.PHONY: bench
+bench:
+	go test -bench=. $(ARGS) ./benchmark
+
 .PHONY: integration-test
 integration-test:
 	@cd tools && go install go.uber.org/nilaway/tools/cmd/integration-test
