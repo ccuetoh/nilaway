@@ -61,7 +61,7 @@ golden-test:
 
 .PHONY: bench
 bench:
-	go test -bench=. $(ARGS) ./benchmark
+	go test -run='^$$' -bench=. $(ARGS) .
 
 .PHONY: integration-test
 integration-test:

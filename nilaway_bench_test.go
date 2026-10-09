@@ -12,15 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Explicitly enable proper types.Alias type for type aliases to ensure the benchmark uses the same behavior as tests.
-//go:debug gotypesalias=1
-
-package benchmark
+package nilaway
 
 import (
 	"testing"
 
-	"go.uber.org/nilaway"
 	"go.uber.org/nilaway/config"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/checker"
@@ -29,7 +25,7 @@ import (
 
 func BenchmarkNilAway(b *testing.B) {
 	// The following selection of packages was chosen to cover a variety of scenarios while keeping benchmark time
-	// reasonable. It includes generics, error-heavy packages, complex times, and so on. Add new packages with care
+	// reasonable. It includes generics, error-heavy packages, complex types, and so on. Add new packages with care
 	// for the impact on CI time.
 	for _, pattern := range []string{
 		"strconv",
@@ -49,14 +45,15 @@ func BenchmarkNilAway(b *testing.B) {
 func benchmarkPackage(b *testing.B, pattern string) {
 	b.Helper()
 
+	setFlag(b, config.IncludePkgsFlag, pattern)
 	setFlag(b, config.PrettyPrintFlag, "false")
 	setFlag(b, config.GroupErrorMessagesFlag, "false")
-	setFlag(b, config.IncludePkgsFlag, pattern)
+	setFlag(b, config.ExcludePkgsFlag, "")
+	setFlag(b, config.ExcludeFileDocStringsFlag, "")
 
-	packagesToAnalyze, err := packages.Load(
+	pkgs, err := packages.Load(
 		&packages.Config{
-			Mode:  packages.LoadAllSyntax | packages.NeedModule,
-			Tests: false,
+			Mode: packages.LoadAllSyntax | packages.NeedModule,
 		},
 		pattern,
 	)
@@ -64,23 +61,19 @@ func benchmarkPackage(b *testing.B, pattern string) {
 		b.Fatal(err)
 	}
 
-	if len(packagesToAnalyze) == 0 {
+	if len(pkgs) == 0 {
 		b.Fatalf("no packages loaded for %q", pattern)
 	}
 
-	checkPackageErrors(packagesToAnalyze, b)
+	if packages.PrintErrors(pkgs) > 0 {
+		b.Fatal("errors loading packages (see above)")
+	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for b.Loop() {
-		graph, err := checker.Analyze(
-			[]*analysis.Analyzer{
-				nilaway.Analyzer,
-			},
-			packagesToAnalyze,
-			nil,
-		)
+		graph, err := checker.Analyze([]*analysis.Analyzer{Analyzer}, pkgs, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -96,34 +89,14 @@ func benchmarkPackage(b *testing.B, pattern string) {
 func setFlag(b *testing.B, name, value string) {
 	b.Helper()
 
+	prev := config.Analyzer.Flags.Lookup(name).Value.String()
 	if err := config.Analyzer.Flags.Set(name, value); err != nil {
 		b.Fatalf("set %s: %v", name, err)
 	}
-}
 
-func checkPackageErrors(pkgs []*packages.Package, b *testing.B) {
-	b.Helper()
-
-	var (
-		seen  = make(map[*packages.Package]struct{})
-		check func(*packages.Package)
-	)
-
-	check = func(pkg *packages.Package) {
-		if _, contains := seen[pkg]; contains {
-			return
+	b.Cleanup(func() {
+		if err := config.Analyzer.Flags.Set(name, prev); err != nil {
+			b.Errorf("restore %s: %v", name, err)
 		}
-
-		seen[pkg] = struct{}{}
-		for _, err := range pkg.Errors {
-			b.Fatalf("loading %s: %v", pkg.PkgPath, err)
-		}
-		for _, imported := range pkg.Imports {
-			check(imported)
-		}
-	}
-
-	for _, pkg := range pkgs {
-		check(pkg)
-	}
+	})
 }
