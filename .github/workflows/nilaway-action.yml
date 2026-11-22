@@ -1,0 +1,117 @@
+name: NilAway Action
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/nilaway/**"
+      - ".github/workflows/nilaway-action.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/nilaway/**"
+      - ".github/workflows/nilaway-action.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.26.x", "1.27.x"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: .github/actions/nilaway/nilaway-version.txt
+      - name: Test the wrapper
+        run: python3 -B -m unittest discover -s .github/actions/nilaway -p 'test_*.py'
+
+      - name: Scan a clean module
+        id: clean
+        uses: ./.github/actions/nilaway
+        with:
+          working-directory: .github/actions/nilaway/testdata/clean
+      - name: Report a cross-package finding without failing
+        id: warn
+        uses: ./.github/actions/nilaway
+        with:
+          working-directory: .github/actions/nilaway/testdata/cross-package
+          fail-on-findings: "false"
+      - name: Fail on a cross-package finding by default
+        id: strict
+        continue-on-error: true
+        uses: ./.github/actions/nilaway
+        with:
+          working-directory: .github/actions/nilaway/testdata/cross-package
+      - name: Fail a broken module in strict mode
+        id: broken_strict
+        continue-on-error: true
+        uses: ./.github/actions/nilaway
+        with:
+          working-directory: .github/actions/nilaway/testdata/broken
+      - name: Fail a broken module in report-only mode
+        id: broken_warn
+        continue-on-error: true
+        uses: ./.github/actions/nilaway
+        with:
+          working-directory: .github/actions/nilaway/testdata/broken
+          fail-on-findings: "false"
+      - name: Fail an unavailable analyzer install
+        id: missing_pin
+        continue-on-error: true
+        uses: ./.github/actions/nilaway
+        with:
+          working-directory: .github/actions/nilaway/testdata/clean
+          nilaway-version: v0.0.0-nilaway-action-smoke-version-does-not-exist
+          fail-on-findings: "false"
+      - name: Assert composite outcomes and outputs
+        env:
+          CLEAN_COUNT: ${{ steps.clean.outputs.finding-count }}
+          WARN_COUNT: ${{ steps.warn.outputs.finding-count }}
+          STRICT_OUTCOME: ${{ steps.strict.outcome }}
+          STRICT_COUNT: ${{ steps.strict.outputs.finding-count }}
+          BROKEN_STRICT_OUTCOME: ${{ steps.broken_strict.outcome }}
+          BROKEN_STRICT_COUNT: ${{ steps.broken_strict.outputs.finding-count }}
+          BROKEN_WARN_OUTCOME: ${{ steps.broken_warn.outcome }}
+          BROKEN_WARN_COUNT: ${{ steps.broken_warn.outputs.finding-count }}
+          MISSING_PIN_OUTCOME: ${{ steps.missing_pin.outcome }}
+          MISSING_PIN_COUNT: ${{ steps.missing_pin.outputs.finding-count }}
+        run: |
+          [[ "$CLEAN_COUNT" == 0 ]]
+          [[ "$WARN_COUNT" == 1 ]]
+          [[ "$STRICT_OUTCOME" == failure && "$STRICT_COUNT" == 1 ]]
+          [[ "$BROKEN_STRICT_OUTCOME" == failure && -z "$BROKEN_STRICT_COUNT" ]]
+          [[ "$BROKEN_WARN_OUTCOME" == failure && -z "$BROKEN_WARN_COUNT" ]]
+          [[ "$MISSING_PIN_OUTCOME" == failure && -z "$MISSING_PIN_COUNT" ]]
+
+      # Composite step outcomes do not expose the cause of failure. Check the real
+      # wrapper's error category directly so an install failure can't pass the broken-module test.
+      - name: Assert distinct failure causes
+        shell: bash
+        env:
+          NILAWAY_FAIL_ON_FINDINGS: "false"
+        run: |
+          wrapper=.github/actions/nilaway/run.py
+          fixtures=.github/actions/nilaway/testdata
+          check_failure() {
+            local log
+            if log=$(python3 -I "$wrapper"); then
+              echo "Expected a failure in $1"
+              return 1
+            fi
+            if [[ "$log" != "::error title=NilAway action failed::$1:"* ]]; then
+              echo "Expected $1 to be the failure stage"
+              return 1
+            fi
+          }
+          NILAWAY_WORKING_DIRECTORY="$fixtures/broken" check_failure Scan
+          NILAWAY_WORKING_DIRECTORY="$fixtures/clean" \
+            NILAWAY_VERSION=v0.0.0-nilaway-action-smoke-version-does-not-exist check_failure Install
