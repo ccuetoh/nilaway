@@ -1,0 +1,30 @@
+name: NilAway
+description: Detect potential nil panics in a Go module and report them as GitHub annotations.
+
+inputs:
+  working-directory:
+    description: Workspace-relative directory containing the module's go.mod.
+    default: "."
+  nilaway-version:
+    description: Exact Go module version of NilAway. Defaults to the version pinned by this action.
+    default: ""
+  fail-on-findings:
+    description: Fail on nil-flow findings when true; otherwise report them as warnings.
+    default: "true"
+
+outputs:
+  finding-count:
+    description: Number of NilAway diagnostics in a completed scan, before display limits.
+    value: ${{ steps.scan.outputs.finding-count }}
+
+runs:
+  using: composite
+  steps:
+    - id: scan
+      name: Analyze Go module
+      shell: bash
+      env:
+        NILAWAY_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        NILAWAY_VERSION: ${{ inputs.nilaway-version }}
+        NILAWAY_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+      run: python3 -I "$GITHUB_ACTION_PATH/run.py"
