@@ -1,20 +1,29 @@
 name: NilAway
-description: Detect potential nil panics in a Go module and report them as GitHub annotations.
+description: Find potential nil panics in a Go module and annotate the affected lines.
 
 inputs:
   working-directory:
-    description: Workspace-relative directory containing the module's go.mod.
+    description: Directory with the module's go.mod, relative to the checkout.
     default: "."
   nilaway-version:
-    description: Exact Go module version of NilAway. Defaults to the version pinned by this action.
+    description: Exact NilAway module version. Leave blank to use the pinned version.
     default: ""
   fail-on-findings:
-    description: Fail on nil-flow findings when true; otherwise report them as warnings.
+    description: Set to false to warn about findings without failing the check.
     default: "true"
+  experimental-anonymous-function:
+    description: Enable experimental anonymous function analysis and emit a warning.
+    default: "false"
+  experimental-struct-init:
+    description: Enable experimental struct initialization analysis and emit a warning.
+    default: "false"
+  experimental-struct-init-v2:
+    description: Enable experimental struct initialization analysis v2 and emit a warning.
+    default: "false"
 
 outputs:
   finding-count:
-    description: Number of NilAway diagnostics in a completed scan, before display limits.
+    description: Total findings in a completed scan, before the annotation limit.
     value: ${{ steps.scan.outputs.finding-count }}
 
 runs:
@@ -27,4 +36,7 @@ runs:
         NILAWAY_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         NILAWAY_VERSION: ${{ inputs.nilaway-version }}
         NILAWAY_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        NILAWAY_EXPERIMENTAL_ANONYMOUS_FUNCTION: ${{ inputs.experimental-anonymous-function }}
+        NILAWAY_EXPERIMENTAL_STRUCT_INIT: ${{ inputs.experimental-struct-init }}
+        NILAWAY_EXPERIMENTAL_STRUCT_INIT_V2: ${{ inputs.experimental-struct-init-v2 }}
       run: python3 -I "$GITHUB_ACTION_PATH/run.py"

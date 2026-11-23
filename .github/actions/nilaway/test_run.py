@@ -2,11 +2,11 @@ import contextlib
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import run as action
@@ -79,10 +79,10 @@ class ActionTest(unittest.TestCase):
 
     def test_effective_module(self):
         for replacement, message in [
-            ({"GoMod": str(self.temp / "alternate.mod")}, "-modfile is not supported"),
-            ({"Main": False}, "-modfile is not supported"),
-            ({"Path": ""}, "expected a Go module path"),
-            ({"Path": "example.com/project,"}, "expected a Go module path"),
+            ({"GoMod": str(self.temp / "alternate.mod")}, "Remove -modfile from GOFLAGS"),
+            ({"Main": False}, "Remove -modfile from GOFLAGS"),
+            ({"Path": ""}, "Expected a Go module path"),
+            ({"Path": "example.com/project,"}, "Expected a Go module path"),
         ]:
             with self.subTest(replacement=replacement):
                 info = {"Path": "example.com/project", "Main": True, "GoMod": str(self.module / "go.mod")}
@@ -97,30 +97,41 @@ class ActionTest(unittest.TestCase):
             )
 
         self.assertEqual(capture("import sys; print('progress', file=sys.stderr); print('{}')"), b"{}\n")
-        with self.assertRaisesRegex(action.CheckError, "output exceeds 2 bytes"):
+        with self.assertRaisesRegex(action.CheckError, "Output exceeds 2 bytes"):
             capture("print('{}')", limit=2)
-        with self.assertRaisesRegex(action.CheckError, r"(?s)exit status 3.*dependency error"):
+        with self.assertRaisesRegex(action.CheckError, r"(?s)Exit status 3.*dependency error"):
             capture("import sys; print('dependency error', file=sys.stderr); sys.exit(3)")
-        with self.assertRaisesRegex(action.CheckError, "could not start"):
+        with self.assertRaisesRegex(action.CheckError, "Could not start"):
             action.capture(["/nonexistent/nilaway"], cwd=self.module, env=self.env, stage="Test")
 
     def test_run_policy_and_fixed_arguments(self):
-        info = encoded({"Path": "example.com/project", "Main": True, "GoMod": str(self.module / "go.mod")})
+        info = encoded({
+            "Path": "example.com/project",
+            "Main": True,
+            "GoMod": str(self.module / "go.mod"),
+        })
         finding_tree = {"pkg": {"nilaway": [diagnostic()]}}
+        prerequisite_error = {"pkg": {"prereq": {"error": "bad"}}}
+        install_error = action.CheckError("[Install] Missing version")
+        scan_error = action.CheckError("[Scan] Exit status 1")
         cases = [
             ("clean", "true", "", {}, 0, "0", None),
             ("strict", "true", "", finding_tree, 1, "1", "::error title=NilAway,file="),
             ("warn", " FALSE ", "v0.1.0", finding_tree, 0, "1", "::warning title=NilAway,file="),
-            ("invalid JSON", "false", "", b"\xff", 1, None, "Scan: expected a JSON object"),
-            ("prerequisite error", "false", "", {"pkg": {"prereq": {"error": "bad"}}}, 1, None, "Scan: prereq:"),
-            ("install error", "false", "v1.2.3", action.CheckError("Install: missing version"), 1, None, "Install:"),
-            ("scan error", "false", "", action.CheckError("Scan: exit status 1"), 1, None, "Scan:"),
+            ("invalid JSON", "false", "", b"\xff", 1, None, "[Scan] Expected a JSON object"),
+            (
+                "prerequisite error", "false", "", prerequisite_error,
+                1, None, "[Scan] prereq reported an error",
+            ),
+            ("install error", "false", "v1.2.3", install_error, 1, None, "[Install]"),
+            ("scan error", "false", "", scan_error, 1, None, "[Scan]"),
         ]
         for prefix in ("INTERNAL PANIC:", "INTERNAL ERROR(s):"):
             for mode in ("true", "false"):
                 for ordinary in ([], [diagnostic()]):
                     tree = {"pkg": {"nilaway": [*ordinary, diagnostic(message=f"{prefix}\nfailed")]}}
-                    cases.append((f"{prefix} {mode} mixed={bool(ordinary)}", mode, "", tree, 1, None, f"Scan: {prefix}"))
+                    name = f"{prefix} {mode} mixed={bool(ordinary)}"
+                    cases.append((name, mode, "", tree, 1, None, f"[Scan] {prefix}"))
         for name, strict, version, result, status, count, log in cases:
             with self.subTest(name=name):
                 out = Path(self.env["GITHUB_OUTPUT"])
@@ -137,16 +148,22 @@ class ActionTest(unittest.TestCase):
                     calls.append((args, stage, cwd, env))
                     if args[0] == "git":
                         return os.fsencode(self.workspace) + b"\n"
+
                     if args[:2] == ["go", "list"]:
                         return info
+
                     if args[:2] == ["go", "env"]:
                         return b"linux\namd64\n"
+
                     if stage == "Install":
                         if name == "install error":
                             raise result
+
                         return b""
+
                     if isinstance(result, Exception):
                         raise result
+
                     return result if isinstance(result, bytes) else encoded(result)
 
                 stdout = io.StringIO()
@@ -154,12 +171,13 @@ class ActionTest(unittest.TestCase):
                     self.assertEqual(action.run(env), status)
                 if log is not None:
                     self.assertIn(log, stdout.getvalue())
+
                 if count is None:
                     self.assertFalse(out.exists())
                     self.assertFalse(summary.exists())
                 else:
                     self.assertEqual(out.read_text(), f"finding-count={count}\n")
-                    self.assertIn(f"Findings: **{count}**", summary.read_text())
+                    self.assertIn(f"**{count}** total", summary.read_text())
 
                 args, _, cwd, install_env = calls[3]
                 pin = version or action.VERSION_FILE.read_text().strip()
@@ -187,18 +205,108 @@ class ActionTest(unittest.TestCase):
             ("NILAWAY_VERSION", "main"),
             ("NILAWAY_VERSION", "v1.0.0\n::warning::unexpected"),
             ("NILAWAY_FAIL_ON_FINDINGS", "yes"),
+            ("NILAWAY_EXPERIMENTAL_STRUCT_INIT", ""),
+            ("NILAWAY_EXPERIMENTAL_STRUCT_INIT_V2", "true -json=false"),
+            ("NILAWAY_EXPERIMENTAL_ANONYMOUS_FUNCTION", "yes"),
         ]:
             with self.subTest(key=key, value=value):
                 stdout = io.StringIO()
                 with patch.object(action, "capture") as capture, contextlib.redirect_stdout(stdout):
                     self.assertEqual(action.run({**self.env, key: value}), 1)
                 capture.assert_not_called()
-                self.assertIn("Configuration:", stdout.getvalue())
+                self.assertIn("[Configuration]", stdout.getvalue())
+                self.assertNotIn("::warning", stdout.getvalue())
+
+    def test_experimental_warning_does_not_change_mode_or_count(self):
+        count = action.MAX_ANNOTATIONS + 2
+        data = encoded({"pkg": {"nilaway": [diagnostic()] * count}})
+        warning = "::warning title=Experimental NilAway checks enabled::"
+        for name, mode, input_value, response, status, expected_count, shown in [
+            ("false", "false", " FaLsE ", data, 0, count, 10),
+            ("clean", "false", " TrUe ", b"{}", 0, 0, 0),
+            ("report only", "false", "true", data, 0, count, 9),
+            ("strict", "true", "true", data, 1, count, 10),
+            ("unsupported flag", "false", "true", None, 1, None, 0),
+            ("strict unsupported flag", "true", "true", None, 1, None, 0),
+            ("failed install", "false", "true", None, 1, None, 0),
+        ]:
+            with self.subTest(name=name):
+                out = Path(self.env["GITHUB_OUTPUT"])
+                summary = Path(self.env["GITHUB_STEP_SUMMARY"])
+                out.unlink(missing_ok=True)
+                summary.unlink(missing_ok=True)
+                env = {
+                    **self.env, "NILAWAY_FAIL_ON_FINDINGS": mode,
+                    "NILAWAY_EXPERIMENTAL_ANONYMOUS_FUNCTION": input_value,
+                    "NILAWAY_EXPERIMENTAL_STRUCT_INIT": "false",
+                    "NILAWAY_EXPERIMENTAL_STRUCT_INIT_V2": input_value,
+                }
+                stdout = io.StringIO()
+                enabled = name != "false"
+                binary = self.temp / "nilaway"
+
+                def install(version, directory, env):
+                    self.assertNotIn(warning, stdout.getvalue())
+                    if name == "failed install":
+                        raise action.CheckError("[Install] Failed")
+
+                    return binary
+
+                def scan(args, **kwargs):
+                    self.assertEqual(args[0], str(binary))
+                    self.assertEqual(args[-1], "./...")
+                    flags = {"-json", "-pretty-print=false", "-include-pkgs=example.com/project"}
+                    if enabled:
+                        flags.update({
+                            "-experimental-anonymous-function=true",
+                            "-experimental-struct-init-v2=true",
+                        })
+                        self.assertTrue(stdout.getvalue().startswith(warning))
+
+                    self.assertCountEqual(args[1:-1], flags)
+                    if response is None:
+                        raise action.CheckError("[Scan] Flag is not defined")
+
+                    return response
+
+                with (
+                    patch.object(action, "module_root", return_value=self.module),
+                    patch.object(action, "module_path", return_value="example.com/project"),
+                    patch.object(action, "install", side_effect=install),
+                    patch.object(action, "capture", side_effect=scan) as capture,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    self.assertEqual(action.run(env), status)
+
+                log = stdout.getvalue()
+                if name == "failed install":
+                    capture.assert_not_called()
+
+                warn = enabled and name != "failed install"
+                self.assertEqual(log.count(warning), int(warn))
+                if warn:
+                    self.assertIn(
+                        "\n" + warning + "Experimental checks may produce false positives.%0A"
+                        "experimental-anonymous-function, experimental-struct-init-v2\n",
+                        "\n" + log,
+                    )
+
+                severity = "error" if mode == "true" else "warning"
+                self.assertEqual(log.count(f"::{severity} title=NilAway,file="), shown)
+                if expected_count is None:
+                    self.assertFalse(out.exists())
+                    self.assertIn("[Install]" if name == "failed install" else "[Scan]", log)
+                else:
+                    self.assertEqual(out.read_text(), f"finding-count={expected_count}\n")
+                    if shown < expected_count:
+                        self.assertIn(f"{expected_count - shown} more not shown.", summary.read_text())
 
     def test_json_shape_and_order(self):
-        for payload in (b"", b"{oops", b"[]", b'{"pkg":[]}', b'{"pkg":{"nilaway":{}}}',
-                        b'{"pkg":{"nilaway":[{"message":"missing posn"}]}}'):
-            with self.subTest(payload=payload), self.assertRaisesRegex(action.CheckError, "Scan:"):
+        for payload in (
+            b"", b"{oops", b"[]", b'{"pkg":[]}', b'{"pkg":{"nilaway":{}}}',
+            b'{"pkg":{"nilaway":[{"message":"missing posn"}]}}',
+        ):
+            with self.subTest(payload=payload), self.assertRaisesRegex(action.CheckError, r"\[Scan\]"):
                 action.findings_from(payload)
         first, second = diagnostic("a.go:1:1"), diagnostic("b.go:2:1")
         self.assertEqual(action.findings_from(encoded({
@@ -240,7 +348,7 @@ class ActionTest(unittest.TestCase):
         self.assertIn("…", stdout.getvalue())
         kept = stdout.getvalue().splitlines()[0].split("::")[-1]
         self.assertLessEqual(len(kept.encode("utf-8")), action.MAX_MESSAGE_BYTES)
-        self.assertIn("2 additional findings", Path(self.env["GITHUB_STEP_SUMMARY"]).read_text())
+        self.assertIn("2 more not shown.", Path(self.env["GITHUB_STEP_SUMMARY"]).read_text())
         self.assertEqual(Path(self.env["GITHUB_OUTPUT"]).read_text(), f"finding-count={count}\n")
 
 
